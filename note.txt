@@ -19,4 +19,21 @@ pip install opencv-python
 #Install numpy
 pip install numpy
 
+#install flask
+
+
+#git update
+git init
+git add .
+git commit -m "update"
+git push -u origin main  
+
+#Check port
+lsof -i :5050
+
+#Kill port
+kill 36986
+
+
+
 
