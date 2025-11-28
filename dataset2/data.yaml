@@ -1,0 +1,13 @@
+train: train/images
+val: valid/images
+test: test/images
+
+nc: 9
+names: ['gloves', 'hardhat', 'no_gloves', 'no_hardhat', 'no_safety_shoes', 'no_safety_vest', 'person', 'safety_shoes', 'safety_vest']
+
+roboflow:
+  workspace: thelab-omkzf
+  project: cctv_ppe
+  version: 5
+  license: Private
+  url: https://app.roboflow.com/thelab-omkzf/cctv_ppe/5

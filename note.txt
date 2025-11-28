@@ -1,0 +1,22 @@
+#Create env by anaconda
+conda create --name kbs_qc_ai_camera python=3.12
+
+#Activate env
+conda activate kbs_qc_ai_camera
+
+#Deactivate env
+conda deactivate 
+
+#Delete env
+conda env remove --name kbs_qc_ai_camera
+
+#Show env
+conda env list
+
+#Install opencv
+pip install opencv-python
+
+#Install numpy
+pip install numpy
+
+
