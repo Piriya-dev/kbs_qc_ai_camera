@@ -1,0 +1,13 @@
+train: ../train/images
+val: ../valid/images
+test: ../test/images
+
+nc: 1
+names: ['trailer']
+
+roboflow:
+  workspace: vehicle-detection-fdj3d
+  project: trailer-detection-ayjfu
+  version: 3
+  license: CC BY 4.0
+  url: https://universe.roboflow.com/vehicle-detection-fdj3d/trailer-detection-ayjfu/dataset/3

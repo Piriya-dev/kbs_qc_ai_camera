@@ -1,0 +1,13 @@
+train: ../train/images
+val: ../valid/images
+test: ../test/images
+
+nc: 1
+names: ['license_plate']
+
+roboflow:
+  workspace: lisence-plate-lejjt
+  project: thai-license-plate-btj5b
+  version: 1
+  license: CC BY 4.0
+  url: https://universe.roboflow.com/lisence-plate-lejjt/thai-license-plate-btj5b/dataset/1

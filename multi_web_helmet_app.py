@@ -67,12 +67,19 @@ BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 # Multi-camera configuration
 CAMERAS = {
     "cam1": {
-        "name": "KBS-HelmetCam-01",
+        "name": "KBS-IT Cam-01",
         "rtsp": "rtsp://admin:KBSit%402468@192.168.4.190:554/ISAPI/Streaming/channels/101",
+        #"rtsp": "rtsp://admin:kbsit%123@192.168.5.45:554/ISAPI/Streaming/channels/101",
     },
     "cam2": {
-        "name": "KBS-HelmetCam-02",
+        "name": "KBS-Gate-02",
         "rtsp": "rtsp://admin:KBSit%402468@192.168.5.61:554/ISAPI/Streaming/channels/102",
+    
+    },
+    "cam3": {
+        "name": "KBS-Truck Tracking-03",
+     "rtsp": "rtsp://admin:KBSit%402468@192.168.5.46:554/ISAPI/Streaming/channels/102",
+    
     },
 }
 CAMERA_IDS = list(CAMERAS.keys())
