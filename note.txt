@@ -35,5 +35,12 @@ lsof -i :5050
 kill 36986
 
 
+# How to train dataset
+cd /Users/piriya/kbs_qc_ai_camera
+yolo detect train \
+  model=yolo11n.pt \
+  data="Thai License Plate yolov11/data.yaml" \
+  epochs=80 \
+  imgsz=640
 
 
