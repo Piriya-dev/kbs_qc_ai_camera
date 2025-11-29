@@ -1,35 +1,26 @@
+
 # web_helmet_app.py
 # Confidential – Internal Use Only
 #
 # Flask web app for real-time helmet detection using YOLO PPE model (hardhat/no_hardhat).
 #
-# Assumed classes from PPE model (dataset2, Roboflow):
-#   names: ['gloves', 'hardhat', 'no_gloves', 'no_hardhat',
-#           'no_safety_shoes', 'no_safety_vest', 'person',
-#           'safety_shoes', 'safety_vest']
-#
 # Logic:
 #   - Run YOLO on each frame (every RUN_EVERY_N frames) when detection is ON.
-#   - If any "no_hardhat" (no helmet) detection => FAIL (red) for FAIL_SEC seconds.
-#   - Else if any "hardhat" detection => PASS (green) for PASS_SEC seconds.
-#   - If YOLO sees person but no helmet/no_helmet boxes => infer NO HELMET (FAIL).
+#   - If any "no_hardhat" (no helmet) detection => FAIL (red) for 2 seconds.
+#   - Else if any "hardhat" detection => PASS (green) for 2 seconds.
 #
 # Snapshots:
-#   - Auto snapshot saved when there is at least ONE NO_HELMET (explicit or inferred),
+#   - Auto snapshot saved when there is at least ONE "no_helmet" (red box),
 #     respecting snapshot_interval_sec (10/30/60).
 #   - Manual snapshot button saves current frame immediately.
 #
 # Telegram sending:
 #   - send_mode = "auto":
-#       * On NO_HELMET auto snapshot, send to Telegram immediately (real-time alert).
+#       * On NO_HELMET auto snapshot, send to Telegram immediately
+#         (real-time alert), rate-limited by snapshot_interval_sec.
 #   - send_mode = "manual":
 #       * Auto snapshots are saved to disk only (no Telegram).
 #       * Manual "Snapshot" button always sends to Telegram instantly.
-#
-# Counters:
-#   - Per-poll counts (helmet_count, no_helmet_count) shown with %.
-#   - Session totals (total_helmet_count, total_no_helmet_count) accumulated
-#     from server start until process stops (not reset on toggle OFF/ON).
 #
 # UI:
 #   - Video stream (MJPEG) in <img>.
@@ -38,7 +29,6 @@
 #   - Auto snapshot interval (10/30/60s).
 #   - Send mode select (Auto / Manual).
 #   - PASS / FAIL big text OUTSIDE video, centered below, with counts + %.
-#   - Session total line below, with cumulative counts.
 #   - Status label overlaid in top-left of video.
 
 import os
@@ -56,10 +46,13 @@ from flask import (
     make_response,
 )
 
-# ───────────────── CONFIG ─────────────────
+# ───────────────────────────────────────────────────────────────
+# CONFIG
+# ───────────────────────────────────────────────────────────────
 
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 
+# Camera name for captions
 CAMERA_NAME = "KBS-HelmetCam-01"
 
 # RTSP stream (Hikvision)
@@ -69,10 +62,9 @@ RTSP_URL = "rtsp://admin:KBSit%402468@192.168.5.61:554/ISAPI/Streaming/channels/
 YOLO_MODEL_PATH = os.path.join(BASE_DIR, "best.pt")
 
 # YOLO settings
-YOLO_CONF = 0.50       # base YOLO confidence threshold
-BOX_CONF_FILTER = 0.65 # extra filter for drawing/classifying boxes
+YOLO_CONF = 0.50
 YOLO_IMGSZ = 840
-RUN_EVERY_N = 2        # run YOLO every N frames for speed
+RUN_EVERY_N = 2  # run YOLO every N frames for speed
 
 # Display size
 MAX_WIDTH = 1048
@@ -86,18 +78,23 @@ os.environ["OPENCV_FFMPEG_CAPTURE_OPTIONS"] = "rtsp_transport;tcp"
 os.environ["OPENCV_VIDEOIO_PRIORITY_MSMF"] = "0"
 os.environ["OPENCV_VIDEOIO_PRIORITY_FFMPEG"] = "1"
 
-# ───────────── SNAPSHOT CONFIG ─────────────
+# ───────────────────────────────────────────────────────────────
+# SNAPSHOT CONFIG
+# ───────────────────────────────────────────────────────────────
 
 SNAPSHOT_DIR = os.path.join(BASE_DIR, "snapshots")
 os.makedirs(SNAPSHOT_DIR, exist_ok=True)
 print(f"[INFO] Snapshot directory: {SNAPSHOT_DIR}")
 
-SNAPSHOT_INTERVAL_OPTIONS = [10, 30, 60]
-DEFAULT_SNAPSHOT_INTERVAL = 30  # seconds between auto snapshots
+# Auto snapshot interval options (seconds)
+SNAPSHOT_INTERVAL_OPTIONS = [3,5,10,15, 30, 60]
+DEFAULT_SNAPSHOT_INTERVAL = 10  # default 30s between auto snapshots
 
-# ───────────── TELEGRAM CONFIG ─────────────
+# ───────────────────────────────────────────────────────────────
+# TELEGRAM CONFIG
+# ───────────────────────────────────────────────────────────────
 
-TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN", "YOUR_BOT_TOKEN_HERE")
+TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN", "8559813204:AAH0wnA83cvbjOr99fbCr_isV5tXepjJxkg")
 TELEGRAM_API_URL = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}"
 
 CHAT_IDS = [
@@ -132,7 +129,9 @@ def send_telegram_photo(image_path: str, caption: str = ""):
         except Exception as e:
             print(f"[TELEGRAM] Error sending photo to chat_id={chat_id}: {e}")
 
-# ───────────── LOAD YOLO MODEL ─────────────
+# ───────────────────────────────────────────────────────────────
+# LOAD YOLO MODEL
+# ───────────────────────────────────────────────────────────────
 
 if not os.path.isfile(YOLO_MODEL_PATH):
     raise FileNotFoundError(f"YOLO model not found: {YOLO_MODEL_PATH}")
@@ -144,32 +143,16 @@ print("[INFO] Model classes:")
 for cid, cname in CLASS_NAMES.items():
     print(f"  id={cid}: {cname}")
 
-# Build explicit ID sets
-HELMET_IDS = set()
-NO_HELMET_IDS = set()
-PERSON_IDS = set()
-
-for cid, cname in CLASS_NAMES.items():
-    name = cname.lower()
-    if "person" in name:
-        PERSON_IDS.add(cid)
-    if "no_hardhat" in name or ("no" in name and "helmet" in name):
-        NO_HELMET_IDS.add(cid)
-    elif "hardhat" in name or "helmet" in name:
-        HELMET_IDS.add(cid)
-
-print(f"[INFO] HELMET_IDS: {HELMET_IDS}")
-print(f"[INFO] NO_HELMET_IDS: {NO_HELMET_IDS}")
-print(f"[INFO] PERSON_IDS: {PERSON_IDS}")
-
-# ───────────── GLOBAL STATE ─────────────
+# ───────────────────────────────────────────────────────────────
+# GLOBAL STATE
+# ───────────────────────────────────────────────────────────────
 
 state = {
-    "detect_enabled": True,
-    "snapshot_interval_sec": DEFAULT_SNAPSHOT_INTERVAL,
+    "detect_enabled": True,                         # Only ON/OFF now
+    "snapshot_interval_sec": DEFAULT_SNAPSHOT_INTERVAL,  # for auto snapshots
 }
 
-# send_mode: "auto" (send on detection) / "manual" (only manual snapshots send)
+# send_mode: "auto" (send on detection) / "manual" (only on button)
 send_config = {
     "mode": "auto",
 }
@@ -179,28 +162,25 @@ last_pass_ts = None
 last_fail_ts = None
 
 # Snapshot state
-last_snapshot_ts = 0.0
-last_frame_for_snapshot = None
+last_snapshot_ts = 0.0          # last auto snapshot time (NO_HELMET)
+last_frame_for_snapshot = None  # last frame for manual snapshot
 
-# For smoothed counts
+# For smoothed counts (avoid flicker when YOLO not run every frame)
 last_helmet_count = 0
 last_no_helmet_count = 0
 
-# Session total counters
-total_helmet_count = 0
-total_no_helmet_count = 0
-
 # Status for web polling
+# pass_fail: "pass", "fail", "none"
 last_status = {
     "pass_fail": "none",
     "text": "NO DETECTION",
     "helmet_count": 0,
     "no_helmet_count": 0,
-    "total_helmet_count": 0,
-    "total_no_helmet_count": 0,
 }
 
-# ───────────── HELPERS ─────────────
+# ───────────────────────────────────────────────────────────────
+# HELPER FUNCTIONS
+# ───────────────────────────────────────────────────────────────
 
 def resize_for_display(frame, max_width=MAX_WIDTH):
     h, w = frame.shape[:2]
@@ -208,6 +188,30 @@ def resize_for_display(frame, max_width=MAX_WIDTH):
         return frame
     scale = max_width / float(w)
     return cv2.resize(frame, (int(w * scale), int(h * scale)), interpolation=cv2.INTER_LINEAR)
+
+
+def is_helmet_label(label: str) -> bool:
+    """
+    Helmet (PASS) for dataset2:
+      - 'hardhat'
+      - or any label containing 'hardhat'/'helmet' without 'no'
+    """
+    l = label.lower()
+    if "no_hardhat" in l:
+        return False
+    return ("hardhat" in l or "helmet" in l) and ("no" not in l)
+
+
+def is_no_helmet_label(label: str) -> bool:
+    """
+    No helmet (FAIL) for dataset2:
+      - 'no_hardhat'
+      - or label containing both 'no' and 'hardhat'/'helmet'
+    """
+    l = label.lower()
+    if "no_hardhat" in l:
+        return True
+    return ("no" in l) and ("hardhat" in l or "helmet" in l)
 
 
 def save_snapshot(image: np.ndarray, prefix: str = "snap", send_to_telegram: bool = False) -> str:
@@ -233,7 +237,9 @@ def save_snapshot(image: np.ndarray, prefix: str = "snap", send_to_telegram: boo
         print(f"[SNAPSHOT] ERROR: Failed to save snapshot with cv2.imwrite: {filepath}")
     return filepath
 
-# ───────────── FLASK APP + HTML ─────────────
+# ───────────────────────────────────────────────────────────────
+# FLASK APP + HTML
+# ───────────────────────────────────────────────────────────────
 
 app = Flask(__name__)
 
@@ -286,16 +292,18 @@ HTML_PAGE = """
       color:#ddd;
       margin-top:4px;
     }
-    .total-line {
-      display:block;
-      font-size:16px;
-      color:#bbb;
-      margin-top:2px;
-    }
     .debug-box {
       margin-top:8px;
       font-size:12px;
       color:#888;
+    }
+    .config-row {
+      display:flex;
+      flex-wrap:wrap;
+      gap:8px;
+      align-items:center;
+      justify-content:center;
+      margin-top:8px;
     }
   </style>
 </head>
@@ -333,10 +341,9 @@ HTML_PAGE = """
 
     <div class="hint">
       PASS (green) when helmet is detected, FAIL (red) when NO HELMET is detected.<br>
-      Auto snapshot runs ONLY on NO HELMET (red box or inferred), with the selected interval.<br>
+      Auto snapshot runs ONLY on NO HELMET (red box), with the selected interval.<br>
       <b>Auto mode:</b> each auto snapshot (NO HELMET) is also sent to Telegram in real-time.<br>
-      <b>Manual mode:</b> auto snapshots stay on disk only; use 📸 Snapshot to send instantly.<br>
-      Session totals accumulate from server start until you restart the app.
+      <b>Manual mode:</b> auto snapshots stay on disk only; use 📸 Snapshot to send instantly.
     </div>
   </div>
 
@@ -416,8 +423,6 @@ HTML_PAGE = """
       const passFail = statusData.pass_fail;
       const helmetCount = statusData.helmet_count ?? 0;
       const noHelmetCount = statusData.no_helmet_count ?? 0;
-      const totalHelmet = statusData.total_helmet_count ?? 0;
-      const totalNoHelmet = statusData.total_no_helmet_count ?? 0;
 
       const bannerEl = document.getElementById('passFailText');
       const debugEl = document.getElementById('debugStatus');
@@ -426,8 +431,6 @@ HTML_PAGE = """
         'DEBUG => pass_fail=' + passFail +
         ', helmet_count=' + helmetCount +
         ', no_helmet_count=' + noHelmetCount +
-        ', total_helmet=' + totalHelmet +
-        ', total_no_helmet=' + totalNoHelmet +
         ', auto_snapshot_interval=' + snapshotIntervalSec + 's' +
         ', send_mode=' + sendMode;
 
@@ -454,12 +457,8 @@ HTML_PAGE = """
 
       const detailHtml =
         '<span class="detail-line">' +
-        'Frame: Helmet ' + helmetCount + ' (' + helmetPct + '%) | ' +
-        'No helmet ' + noHelmetCount + ' (' + noHelmetPct + '%)' +
-        '</span>' +
-        '<span class="total-line">' +
-        'Session total – Helmet: ' + totalHelmet +
-        ' | No helmet: ' + totalNoHelmet +
+        'Helmet: ' + helmetCount + ' (' + helmetPct + '%) | ' +
+        'No helmet: ' + noHelmetCount + ' (' + noHelmetPct + '%)' +
         '</span>';
 
       bannerEl.innerHTML = titleText + detailHtml;
@@ -508,7 +507,9 @@ HTML_PAGE = """
 </html>
 """
 
-# ───────────── ROUTES ─────────────
+# ───────────────────────────────────────────────────────────────
+# ROUTES
+# ───────────────────────────────────────────────────────────────
 
 @app.route("/")
 def index():
@@ -531,6 +532,7 @@ def detection_state():
 
 @app.route("/latest_status")
 def latest_status_endpoint():
+    # PASS/FAIL info + counts
     return jsonify(last_status)
 
 
@@ -541,7 +543,7 @@ def toggle_detection():
     state["detect_enabled"] = new_state
 
     if not new_state:
-        # clear per-frame status (but keep totals)
+        # When turning OFF, clear timers & status
         last_pass_ts = None
         last_fail_ts = None
         last_status["pass_fail"] = "none"
@@ -559,6 +561,7 @@ def toggle_detection():
 
 @app.route("/set_snapshot_interval", methods=["POST"])
 def set_snapshot_interval():
+    """Set auto snapshot interval (in seconds) from the UI dropdown."""
     data = request.get_json(silent=True) or {}
     try:
         sec = int(data.get("snapshot_interval_sec", DEFAULT_SNAPSHOT_INTERVAL))
@@ -575,6 +578,7 @@ def set_snapshot_interval():
 
 @app.route("/set_send_mode", methods=["POST"])
 def set_send_mode():
+    """Toggle auto/manual sending to Telegram."""
     data = request.get_json(silent=True) or {}
     mode = data.get("mode", "auto")
     if mode not in ("auto", "manual"):
@@ -586,21 +590,24 @@ def set_send_mode():
 
 @app.route("/manual_snapshot", methods=["POST"])
 def manual_snapshot():
+    """Manually save a snapshot of the latest frame and send to Telegram."""
     global last_frame_for_snapshot
     if last_frame_for_snapshot is None:
         print("[SNAPSHOT] ERROR: manual snapshot requested but no frame yet")
         return jsonify({"ok": False, "error": "No frame available yet"}), 500
 
+    # Manual always sends to Telegram
     filepath = save_snapshot(last_frame_for_snapshot, prefix="manual", send_to_telegram=True)
     return jsonify({"ok": True, "file": filepath})
 
-# ───────────── FRAME GENERATOR ─────────────
+# ───────────────────────────────────────────────────────────────
+# FRAME GENERATOR
+# ───────────────────────────────────────────────────────────────
 
 def generate_frames():
     global last_pass_ts, last_fail_ts, last_status
     global last_snapshot_ts, last_frame_for_snapshot
     global last_helmet_count, last_no_helmet_count
-    global total_helmet_count, total_no_helmet_count
 
     print(f"[INFO] Opening RTSP: {RTSP_URL}")
     cap = cv2.VideoCapture(RTSP_URL, cv2.CAP_FFMPEG)
@@ -640,9 +647,9 @@ def generate_frames():
         detect_enabled = state["detect_enabled"]
         snapshot_interval_sec = state["snapshot_interval_sec"]
 
+        # counts for THIS detection run
         frame_helmet_count = 0
         frame_no_helmet_count = 0
-        frame_person_count = 0
         detection_ran = False
 
         if detect_enabled and (frame_idx % RUN_EVERY_N == 0):
@@ -652,72 +659,61 @@ def generate_frames():
             for box in results.boxes:
                 cls_id = int(box.cls[0])
                 conf = float(box.conf[0])
-                if conf < BOX_CONF_FILTER:
-                    continue
-
                 x1, y1, x2, y2 = map(int, box.xyxy[0])
+
                 x1 = max(0, min(x1, w - 1))
                 y1 = max(0, min(y1, h - 1))
                 x2 = max(0, min(x2, w))
                 y2 = max(0, min(y2, h))
 
                 label = CLASS_NAMES.get(cls_id, str(cls_id))
-                print(f"[DETECT] id={cls_id} name={label} conf={conf:.2f}")
 
-                if cls_id in NO_HELMET_IDS:
+                # Debug confidence values
+                print(f"[DETECT] {label} conf={conf:.2f}")
+
+                if is_no_helmet_label(label):
                     frame_no_helmet_count += 1
-                    color = (0, 0, 255)     # red
-                elif cls_id in HELMET_IDS:
+                    color = (0, 0, 255)
+                elif is_helmet_label(label):
                     frame_helmet_count += 1
-                    color = (0, 255, 0)     # green
-                elif cls_id in PERSON_IDS:
-                    frame_person_count += 1
-                    color = (255, 255, 0)   # yellow for person
+                    color = (0, 255, 0)
                 else:
-                    color = (255, 0, 0)     # blue for other
+                    # other class, draw blue
+                    color = (255, 0, 0)
 
                 cv2.rectangle(draw, (x1, y1), (x2, y2), color, 2)
                 cv2.putText(draw, f"{label} {conf:.2f}",
                             (x1, max(y1 - 10, 20)),
                             cv2.FONT_HERSHEY_SIMPLEX, 0.6, color, 2)
 
-        # logic for this detection cycle
-        any_no_helmet_box = detection_ran and frame_no_helmet_count > 0
-        any_helmet_box = detection_ran and frame_helmet_count > 0
-        any_person_box = detection_ran and frame_person_count > 0
+        # logic for this frame (based ONLY on fresh detection)
+        any_no_helmet = detection_ran and frame_no_helmet_count > 0
+        any_helmet = detection_ran and frame_helmet_count > 0
 
-        inferred_no_helmet = False
+        # decide smoothed counts to send to UI
         if detection_ran:
-            if any_person_box and not any_helmet_box and not any_no_helmet_box:
-                inferred_no_helmet = True
-
-        if detection_ran:
-            if inferred_no_helmet and frame_no_helmet_count == 0:
-                frame_no_helmet_count = 1
-
             helmet_count = frame_helmet_count
             no_helmet_count = frame_no_helmet_count
-
             last_helmet_count = helmet_count
             last_no_helmet_count = no_helmet_count
-
-            total_helmet_count += frame_helmet_count
-            total_no_helmet_count += frame_no_helmet_count
         else:
             helmet_count = last_helmet_count
             no_helmet_count = last_no_helmet_count
 
-        # PASS / FAIL decision
+        # ───────────────────────────────────
+        # Decide PASS / FAIL for this moment
+        # ───────────────────────────────────
         now = time.time()
         status_text = "NO DETECTION"
         status_color = (128, 128, 128)
 
         if detect_enabled:
-            if any_no_helmet_box or inferred_no_helmet:
+            if any_no_helmet:
                 status_text = "NO HELMET (ALERT)"
                 status_color = (0, 0, 255)
                 last_fail_ts = now
 
+                # Auto snapshot on NO-HELMET with interval
                 if now - last_snapshot_ts > snapshot_interval_sec:
                     send_to_tg = (send_config["mode"] == "auto")
                     print(
@@ -727,7 +723,7 @@ def generate_frames():
                     save_snapshot(draw, prefix="no_helmet", send_to_telegram=send_to_tg)
                     last_snapshot_ts = now
 
-            elif any_helmet_box:
+            elif any_helmet:
                 status_text = "HELMET DETECTED"
                 status_color = (0, 255, 0)
                 last_pass_ts = now
@@ -735,29 +731,36 @@ def generate_frames():
             status_text = "DETECTION OFF"
             status_color = (128, 128, 128)
 
+        # PASS/FAIL state for info line
         pass_fail_state = "none"
         if detect_enabled and last_pass_ts is not None and now - last_pass_ts <= PASS_SEC:
             pass_fail_state = "pass"
         if detect_enabled and last_fail_ts is not None and now - last_fail_ts <= FAIL_SEC:
+            # FAIL overrides PASS
             pass_fail_state = "fail"
 
+        # Update shared status for /latest_status
         last_status["pass_fail"] = pass_fail_state
         last_status["text"] = status_text
         last_status["helmet_count"] = helmet_count
         last_status["no_helmet_count"] = no_helmet_count
-        last_status["total_helmet_count"] = total_helmet_count
-        last_status["total_no_helmet_count"] = total_no_helmet_count
 
+        # ───────────────────────────────────
+        # Overlays in video
+        # ───────────────────────────────────
         frame_to_show = resize_for_display(draw, MAX_WIDTH)
         h_show, w_show = frame_to_show.shape[:2]
 
+        # Keep last frame for manual snapshot (with overlays)
         last_frame_for_snapshot = frame_to_show.copy()
 
+        # Status (top-left)
         cv2.putText(frame_to_show, status_text,
                     (10, 30),
                     cv2.FONT_HERSHEY_SIMPLEX, 0.8,
                     status_color, 2)
 
+        # Detection ON/OFF (top-right)
         det_text = f"Detection: {'ON' if detect_enabled else 'OFF'}"
         (tw, th), _ = cv2.getTextSize(det_text,
                                       cv2.FONT_HERSHEY_SIMPLEX, 0.6, 2)
@@ -766,6 +769,7 @@ def generate_frames():
                     cv2.FONT_HERSHEY_SIMPLEX, 0.6,
                     (0, 255, 255), 2)
 
+        # JPEG encode
         ret2, buffer = cv2.imencode(".jpg", frame_to_show)
         if not ret2:
             continue
@@ -773,6 +777,7 @@ def generate_frames():
 
         yield (b"--frame\r\n"
                b"Content-Type: image/jpeg\r\n\r\n" + frame_bytes + b"\r\n")
+
 
 @app.route("/video_feed")
 def video_feed():
@@ -787,4 +792,5 @@ def video_feed():
 
 
 if __name__ == "__main__":
+    # Use 5050 or any free port you like
     app.run(host="0.0.0.0", port=5050, debug=False, threaded=True)
